@@ -47,3 +47,12 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+/.quarto/
+**/*.quarto_ipynb
+
+# Snyk Security Extension - AI Rules (auto-generated)
+.cursor/rules/snyk_rules.mdc

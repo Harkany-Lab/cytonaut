@@ -1,0 +1,27 @@
+project:
+  type: manuscript
+
+manuscript:
+  article: index.qmd
+  notebooks:
+    - notebook: notebooks/01-seminar-single-cell-fundamentals.qmd
+      title: "Seminar 01 — Single-Cell Omics Fundamentals: From Raw Counts to Publication-Quality Figures"
+
+format:
+  html:
+    code-fold: true
+    code-tools: true
+    comments:
+      hypothesis: true
+    theme:
+      light: flatly
+      dark: darkly
+    citations-hover: true
+    crossrefs-hover: true
+    toc: true
+    toc-depth: 3
+  docx: default
+  jats: default
+
+execute:
+  freeze: auto

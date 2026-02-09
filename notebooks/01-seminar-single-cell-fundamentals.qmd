@@ -1,0 +1,1177 @@
+---
+title: "Seminar 01 — Single-Cell Omics Fundamentals: From Raw Counts to Publication-Quality Figures"
+subtitle: "A self-guiding survival guide for reproducible single-cell RNA-seq analysis with Seurat & tidyverse"
+date: last-modified
+date-format: "YYYY-MM-DD"
+authors:
+  - name: Evgenii O. Tretiakov
+    orcid: 0000-0001-5765-4990
+    email: Evgenii.Tretiakov@meduniwien.ac.at
+    affiliations:
+      - ref: muw
+affiliations:
+  - id: muw
+    name: Medical University of Vienna
+    department: Department of Molecular Neurosciences
+    city: Vienna
+    country: Austria
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    toc-location: left
+    number-sections: true
+    code-fold: show
+    code-tools: true
+    code-link: true
+    code-line-numbers: true
+    code-overflow: wrap
+    fig-dpi: 300
+    fig-format: png
+    fig-responsive: true
+    embed-resources: true
+    theme:
+      light: flatly
+      dark: darkly
+    citations-hover: true
+    crossrefs-hover: true
+    smooth-scroll: true
+    df-print: paged
+    highlight-style: github
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+  cache: true
+  freeze: auto
+knitr:
+  opts_chunk:
+    fig.retina: 2
+    fig.width: 14
+    fig.height: 12
+    fig.align: center
+    autodep: true
+    dev: ragg_png
+    dpi: 300
+    cache.lazy: false
+    R.options:
+      knitr.table.format: html
+---
+
+<!--
+  ╔═══════════════════════════════════════════════════════════════════════════╗
+  ║                         CYTONAUT — SEMINAR 01                           ║
+  ║                                                                         ║
+  ║  This notebook is designed as a self-sufficient survival guide.         ║
+  ║  Every section embeds best practices, reproducibility patterns, and     ║
+  ║  publication-quality figure techniques FROM THE FIRST LINE OF CODE.    ║
+  ║                                                                         ║
+  ║  Real examples drawn from published analyses:                          ║
+  ║  • Gueissaz et al., 2025 — PVN representation                         ║
+  ║  • Zupancic et al., 2023 — Onecut3 in hypothalamus development        ║
+  ║  • Romanov et al., 2020 — Hypothalamus development atlas              ║
+  ║  • Tretiakov & Harkany — eCB, Mc4r, SCN development                   ║
+  ╚═══════════════════════════════════════════════════════════════════════════╝
+-->
+
+# Preamble: Philosophy & Mindset {.unnumbered}
+
+::: {.callout-important}
+## Rule Zero
+Best practices, reproducibility, and publication-quality figures are **not** something you learn "later." They are practiced from the **first line of code** you write. Every chunk in this notebook demonstrates this principle.
+:::
+
+::: {.callout-tip}
+## What Makes a Cytonautics Survivor?
+
+1. **Reproducibility is non-negotiable.** Every analysis must regenerate from raw data with a single command (`pixi run render`).
+2. **Figures are first-class citizens.** A figure that cannot go into *Nature* directly is not finished.
+3. **Code is communication.** Your future self in 6 months is your most important reader.
+4. **Version control everything.** If it's not in git, it doesn't exist.
+5. **Automate the boring stuff.** One-liners and piped workflows save hours.
+:::
+
+
+# Environment Setup & Reproducibility Infrastructure
+
+## Why pixi? {#sec-why-pixi}
+
+`pixi` is a cross-platform package manager built on conda-forge that provides:
+
+- **Exact reproducibility** via lock files (`pixi.lock`)
+- **Cross-platform support** (Linux, macOS, Windows) from the same `pixi.toml`
+- **Task automation** — define build/render/setup chains
+- **No conda/mamba conflicts** — clean resolver, fast installs
+
+::: {.callout-note}
+## Windows Users: pixi Task Syntax
+
+pixi uses `deno_task_shell` internally, which provides a unified shell across all platforms. You do **not** need to write `cmd /c` or PowerShell-specific commands. The same task definition works everywhere:
+
+```toml
+[tasks]
+render = "quarto render"          # Works on Linux, macOS, AND Windows
+start = "radian"                  # Same command everywhere
+
+[target.win-64.tasks]
+rstudio = "rstudio"               # Only needed when the OS command differs
+
+[target.osx.tasks]
+rstudio = "open -a RStudio"       # macOS-specific launcher
+```
+
+**Installation on Windows:**
+
+```powershell
+# PowerShell (recommended)
+iwr -useb https://pixi.sh/install/install.ps1 | iex
+
+# Then from your project directory:
+pixi install
+pixi run setup-environment
+pixi run start
+```
+
+On Linux/macOS use the `install.sh` bootstrap script:
+
+```bash
+bash install.sh
+```
+:::
+
+## Session Setup
+
+```{r}
+#| label: setup
+#| cache: false
+#| code-summary: "Session configuration — run once per render"
+
+# ── Execution timing (track how long each chunk takes) ───────────────────────
+# Tip: This knitr hook is invaluable for identifying bottlenecks
+knitr::knit_hooks$set(time_it = local({
+  now <- NULL
+  function(before, options) {
+    if (before) { now <<- Sys.time() }
+    else {
+      res <- difftime(Sys.time(), now, units = "secs")
+      now <<- NULL
+      sprintf(
+        "<p style='text-align:right; font-size:0.8em; color:grey;'>
+         ⏱ Chunk <b>%s</b> took %.1f sec</p>",
+        options$label, res
+      )
+    }
+  }
+}))
+knitr::opts_chunk$set(time_it = TRUE)
+
+# ── Libraries ────────────────────────────────────────────────────────────────
+# Load in dependency order: infrastructure → data → analysis → visualization
+suppressPackageStartupMessages({
+  # Parallelism (load first to configure workers before heavy packages)
+  library(future)
+
+  # Tidyverse ecosystem (data manipulation backbone)
+  library(tidyverse)
+  library(magrittr)
+
+  # Single-cell analysis
+  library(Seurat)
+  library(SeuratWrappers)
+
+  # Bioconductor
+  library(SingleCellExperiment)
+  library(scater)
+  library(scran)
+
+  # Visualization
+  library(ggplot2)
+  library(cowplot)
+  library(patchwork)
+  library(ggnewscale)
+  library(ggrepel)
+  library(ggrastr)
+  library(RColorBrewer)
+  library(viridis)
+  library(UpSetR)
+  library(scCustomize)
+
+  # Utility
+  library(here)
+  library(janitor)
+  library(skimr)
+  library(sessioninfo)
+})
+
+# ── Reproducibility seed ─────────────────────────────────────────────────────
+# ALWAYS set a seed. Use a meaningful date or constant.
+reseed <- 20250209
+set.seed(reseed)
+
+# ── Parallel processing ──────────────────────────────────────────────────────
+# Tip: Use availableCores() - 1 to leave headroom for the OS
+n_cores <- max(1L, parallelly::availableCores() - 1L)
+plan("multicore", workers = n_cores)
+options(
+  future.globals.maxSize = Inf,    # Allow large objects in parallel
+  future.rng.onMisuse = "ignore"   # Suppress RNG warnings in parallel
+)
+cat(sprintf("Parallel workers: %d\n", n_cores))
+
+# ── Project paths (ALWAYS use here::here()) ──────────────────────────────────
+# Tip: Never use setwd(). Never use absolute paths.
+# here::here() finds the project root via .here, .git, or pixi.toml
+data_dir   <- here("data")
+output_dir <- here("output")
+plots_dir  <- here("output", "figures")
+tables_dir <- here("output", "tables")
+dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(tables_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ── Publication-quality theme (set ONCE, applied EVERYWHERE) ─────────────────
+# This is from the ggmin package used across all Harkany Lab publications
+theme_set(ggmin::theme_powerpoint())
+```
+
+::: {.callout-tip}
+## Essential One-Liners for Day-to-Day Work
+
+```r
+# Quick glimpse at any data frame
+df |> skimr::skim()
+
+# Clean column names (remove spaces, special chars, standardize case)
+df |> janitor::clean_names()
+
+# Frequency table with percentages
+df |> janitor::tabyl(column_name)
+
+# Find your project root from anywhere
+here::here("data", "my_file.csv")
+
+# Check memory usage of R objects
+lobstr::obj_size(seurat_obj)
+
+# Garbage collect explicitly after large operations
+invisible(gc())
+```
+:::
+
+
+# Understanding Your Data: The 10x Chromium Pipeline
+
+::: {.callout-note}
+## What Arrives on Your Desk
+
+When you receive single-cell data from a core facility, you typically get one of:
+
+1. **Raw FASTQ files** — need Cell Ranger / STARsolo / Salmon-alevin processing
+2. **Cell Ranger output** — `filtered_feature_bc_matrix/` directory with:
+   - `barcodes.tsv.gz` — cell barcodes
+   - `features.tsv.gz` — gene names and IDs
+   - `matrix.mtx.gz` — sparse count matrix (Market Matrix format)
+3. **H5 files** — `filtered_feature_bc_matrix.h5` (same data, single file)
+4. **Pre-processed objects** — `.rds` (Seurat), `.h5ad` (AnnData), `.h5seurat`
+:::
+
+
+## Loading Data Into Seurat
+
+```{r}
+#| label: load-data
+#| code-summary: "Multiple ways to load scRNA-seq data"
+#| eval: false
+
+# ── Method 1: From Cell Ranger output directory ─────────────────────────────
+# This is the most common starting point
+counts <- Read10X(data.dir = here("data", "filtered_feature_bc_matrix"))
+srt <- CreateSeuratObject(
+  counts  = counts,
+  project = "my_project",
+  min.cells    = 3,    # Gene must be in ≥3 cells
+  min.features = 200   # Cell must have ≥200 genes
+)
+
+# ── Method 2: From H5 file ──────────────────────────────────────────────────
+counts <- Read10X_h5(here("data", "filtered_feature_bc_matrix.h5"))
+srt <- CreateSeuratObject(counts = counts, project = "my_project")
+
+# ── Method 3: From CellBender-corrected H5 (ambient RNA removed) ────────────
+# Tip: CellBender removes ambient RNA contamination — ALWAYS use if available
+# From PRJNA548917 workflow:
+srt <- Read_CellBender_h5_Multi_Directory(
+  base_path    = here("cellbender"),
+  custom_name  = "_output_FPR_0.001_filtered.h5",
+  sample_names = c("SRR9303096", "SRR9303097"),
+  merge        = TRUE
+)
+
+# ── Method 4: From H5Seurat (pre-saved Seurat objects) ──────────────────────
+# From Zupancic_2023 workflow:
+srt <- LoadH5Seurat(here("data", "my_object.h5seurat"))
+
+# ── Method 5: From CSV (bulk-like single-cell, e.g., Smart-seq2) ────────────
+# From Gueissaz_2025 workflow (Xu et al., 2020 dataset):
+counts_csv <- read_csv(here("data", "GSE148568_compiled_data.csv"))
+genes <- counts_csv$gene_name
+counts_mtx <- counts_csv |>
+  select(-gene_name) |>
+  as.matrix()
+rownames(counts_mtx) <- genes
+srt <- CreateSeuratObject(counts = counts_mtx, project = "xu2020")
+```
+
+
+# Quality Control: The Make-or-Break Step {#sec-qc}
+
+::: {.callout-warning}
+## QC Determines Everything Downstream
+Bad QC → bad clusters → bad biology → retracted paper. There is no algorithm that fixes garbage input.
+:::
+
+## Adding QC Metrics
+
+```{r}
+#| label: qc-metrics
+#| code-summary: "Calculate per-cell quality metrics"
+#| eval: false
+
+# ── Mitochondrial and ribosomal content ──────────────────────────────────────
+# scCustomize provides a one-liner for mouse ("mouse") or human ("human")
+srt <- Add_Mito_Ribo_Seurat(srt, species = "mouse")
+
+# ── Hemoglobin genes (blood contamination marker) ───────────────────────────
+# Tip: The regex ^Hb[^(p)] matches Hba-a1, Hbb-bs etc. but NOT Hbp1
+srt[["percent_hb"]] <- PercentageFeatureSet(srt, pattern = "^Hb[^(p)]")
+
+# ── Cell complexity: log10(genes) / log10(UMI) ──────────────────────────────
+# Low complexity = degraded cells or empty droplets
+srt <- Add_Cell_Complexity_Seurat(srt)
+
+# ── Doublet scores (from Scrublet, run in Python) ───────────────────────────
+# From PRJNA548917 workflow: load pre-computed scores
+scrublet_scores <- read_tsv(here("data", "scrublet_scores.tsv"))
+srt$doublet_score <- scrublet_scores$doublet_score[match(
+  colnames(srt), scrublet_scores$barcode
+)]
+```
+
+## QC Thresholds
+
+```{r}
+#| label: qc-thresholds
+#| code-summary: "Define QC filtering parameters"
+#| eval: false
+
+# ── Empirically validated thresholds from published analyses ─────────────────
+# These come from Romanov et al. 2020 / Gueissaz et al. 2025 workflows
+low_cutoff_gene  <- 500      # Min genes per cell (removes empty droplets)
+high_cutoff_gene <- 6000     # Max genes per cell (removes doublets)
+high_cutoff_umis <- 20000    # Max UMI count
+high_cutoff_pc_mt <- 15      # Max % mitochondrial (dying cells)
+high_cutoff_pc_rb <- 40      # Max % ribosomal (unusual but check)
+high_cutoff_complexity <- 0.85  # Max log10(genes/UMI) complexity
+high_cutoff_doublet <- 0.33  # Scrublet doublet score threshold
+```
+
+## Visualizing QC (Publication-Quality from Day 1)
+
+```{r}
+#| label: qc-violin-plots
+#| code-summary: "QC violin plots — the first figure you make should be journal-ready"
+#| eval: false
+#| fig-width: 16
+#| fig-height: 10
+
+# ── Publication-quality QC violin plots ──────────────────────────────────────
+# Tip: ALWAYS use ggrastr::rasterise() for scatter/violin plots with >1000 points
+# This keeps the file size manageable while preserving vector text/axes
+
+p_genes <- VlnPlot(srt, features = "nFeature_RNA", pt.size = 0) +
+  geom_hline(yintercept = c(low_cutoff_gene, high_cutoff_gene),
+             linetype = "dashed", color = "red", linewidth = 0.5) +
+  NoLegend() +
+  labs(title = "Genes per cell", x = NULL)
+
+p_umis <- VlnPlot(srt, features = "nCount_RNA", pt.size = 0) +
+  geom_hline(yintercept = high_cutoff_umis,
+             linetype = "dashed", color = "red", linewidth = 0.5) +
+  NoLegend() +
+  labs(title = "UMIs per cell", x = NULL)
+
+p_mito <- VlnPlot(srt, features = "percent_mito", pt.size = 0) +
+  geom_hline(yintercept = high_cutoff_pc_mt,
+             linetype = "dashed", color = "red", linewidth = 0.5) +
+  NoLegend() +
+  labs(title = "% Mitochondrial", x = NULL)
+
+p_complexity <- VlnPlot(srt, features = "log10GenesPerUMI", pt.size = 0) +
+  geom_hline(yintercept = high_cutoff_complexity,
+             linetype = "dashed", color = "red", linewidth = 0.5) +
+  NoLegend() +
+  labs(title = "Complexity", x = NULL)
+
+# ── Compose with patchwork ───────────────────────────────────────────────────
+# Tip: patchwork is the gold standard for multi-panel figures in R
+(p_genes | p_umis | p_mito | p_complexity) +
+  plot_annotation(
+    title    = "Quality Control Metrics",
+    subtitle = sprintf("n = %s cells before filtering", format(ncol(srt), big.mark = ",")),
+    theme    = theme(plot.title = element_text(size = 16, face = "bold"))
+  )
+
+# ── Save with cowplot for exact dimensions ───────────────────────────────────
+# Tip: Nature requires 300 DPI, CMYK optional. Always save at 300+ DPI.
+cowplot::save_plot(
+  filename = here(plots_dir, "01_qc_violins.pdf"),
+  plot     = last_plot(),
+  base_width  = 16,
+  base_height = 10,
+  dpi = 300
+)
+```
+
+## Filtering
+
+```{r}
+#| label: qc-filter
+#| code-summary: "Apply QC filters"
+#| eval: false
+
+cat(sprintf("Cells before QC: %d\n", ncol(srt)))
+
+srt <- subset(
+  srt,
+  subset = nFeature_RNA > low_cutoff_gene &
+           nFeature_RNA < high_cutoff_gene &
+           nCount_RNA   < high_cutoff_umis &
+           percent_mito < high_cutoff_pc_mt &
+           log10GenesPerUMI < high_cutoff_complexity &
+           doublet_score < high_cutoff_doublet
+)
+
+cat(sprintf("Cells after QC:  %d\n", ncol(srt)))
+
+# ── Memory management ────────────────────────────────────────────────────────
+# Tip: ALWAYS gc() after filtering large objects
+invisible(gc())
+```
+
+
+# Normalization: SCTransform v2
+
+::: {.callout-important}
+## Why SCTransform, Not LogNormalize?
+`SCTransform` (v2, with `glmGamPoi`) uses regularized negative binomial regression to:
+
+- Stabilize variance across expression levels
+- Handle zero-inflation properly
+- Remove technical variation without over-correcting biology
+
+This is the default in all Harkany Lab published analyses since 2022.
+:::
+
+```{r}
+#| label: sctransform
+#| code-summary: "SCTransform v2 normalization with cell cycle regression"
+#| eval: false
+
+# ── Step 1: Cell cycle scoring (BEFORE normalization) ────────────────────────
+# Tip: Convert human gene lists to mouse orthologs
+s_genes <- gprofiler2::gorth(
+  cc.genes.updated.2019$s.genes,
+  source_organism = "hsapiens",
+  target_organism = "mmusculus"
+)$ortholog_name
+
+g2m_genes <- gprofiler2::gorth(
+  cc.genes.updated.2019$g2m.genes,
+  source_organism = "hsapiens",
+  target_organism = "mmusculus"
+)$ortholog_name
+
+# Standard normalize first (needed for CellCycleScoring)
+srt <- NormalizeData(srt)
+srt <- CellCycleScoring(srt, s.features = s_genes, g2m.features = g2m_genes)
+
+# ── Step 2: SCTransform v2 ──────────────────────────────────────────────────
+# From PRJNA548917 / Gueissaz_2025 workflows:
+srt <- SCTransform(
+  srt,
+  vst.flavor              = "v2",       # Improved Pearson residuals
+  variable.features.n     = 3500,       # Number of variable features
+  vars.to.regress         = c(
+    "log10GenesPerUMI",                 # Regress complexity
+    "S.Score", "G2M.Score"              # Regress cell cycle
+  ),
+  return.only.var.genes   = FALSE,      # Keep all genes for downstream
+  seed.use                = reseed,
+  verbose                 = FALSE
+)
+```
+
+
+# Feature Selection: What Goes In Determines What Comes Out {#sec-features}
+
+::: {.callout-tip}
+## The Harkany Lab Feature Exclusion Strategy
+
+A critical pattern across all published analyses is **aggressive exclusion of non-informative genes** before dimensionality reduction:
+:::
+
+```{r}
+#| label: feature-selection
+#| code-summary: "Curated gene filtering — remove noise, keep biology"
+#| eval: false
+
+# ── Define gene categories to EXCLUDE from variable features ─────────────────
+# These genes dominate variance but carry no cell-type information
+
+# Regex pattern for batch/technical genes
+var_regex <- "^Hla-|^Ig[hjkl]|^Rna|^mt-|^Rp[sl]|^Hb[^(p)]|^Gm"
+
+# Curated exclusion lists
+housekeeping_mouse <- read_tsv(
+  here("data", "housekeeping_mouse.tsv"),
+  col_names = "gene"
+)$gene
+
+sex_genes <- c("Xist", "Tsix", "Eif2s3y", "Ddx3y", "Uty", "Kdm5d")
+
+stress_genes <- c(
+  "Fos", "Jun", "Junb", "Jund", "Egr1", "Egr2",
+  "Atf3", "Fosb", "Dusp1", "Nr4a1", "Btg2"
+)
+
+# ── Filter variable features ────────────────────────────────────────────────
+hvg <- VariableFeatures(srt)
+cat(sprintf("Variable features before filtering: %d\n", length(hvg)))
+
+# Remove regex-matched genes
+hvg <- hvg[str_detect(hvg, var_regex, negate = TRUE)]
+
+# Remove curated lists
+hvg <- hvg[!hvg %in% housekeeping_mouse]
+hvg <- hvg[!hvg %in% sex_genes]
+hvg <- hvg[!hvg %in% stress_genes]
+
+cat(sprintf("Variable features after filtering:  %d\n", length(hvg)))
+```
+
+
+# Dimensionality Reduction & Clustering
+
+## PCA with Statistical Validation
+
+```{r}
+#| label: pca
+#| code-summary: "PCA with JackStraw significance testing"
+#| eval: false
+
+srt <- ScaleData(srt, features = hvg)
+srt <- RunPCA(srt, features = hvg, npcs = 50, seed.use = reseed, verbose = FALSE)
+
+# ── JackStraw: statistically determine significant PCs ───────────────────────
+# Tip: This is slow but ESSENTIAL. Do not skip.
+srt <- JackStraw(srt, dims = 50, num.replicate = 100)
+srt <- ScoreJackStraw(srt, dims = 1:50)
+
+# Select PCs with p < 1e-5 AND variance above 10th percentile
+js_results <- srt[["pca"]]@jackstraw$overall.p.values
+stdevs     <- srt[["pca"]]@stdev
+
+selected_pcs <- which(
+  js_results[, "Score"] <= 1e-05 &
+  stdevs > quantile(stdevs, 0.10)
+)
+cat(sprintf("Selected %d significant PCs\n", length(selected_pcs)))
+
+# ── Elbow plot (quick visual sanity check) ───────────────────────────────────
+ElbowPlot(srt, ndims = 50) +
+  geom_vline(xintercept = max(selected_pcs) + 0.5,
+             linetype = "dashed", color = "red") +
+  labs(title = sprintf("Elbow plot — %d PCs selected", length(selected_pcs)))
+```
+
+## UMAP Embedding
+
+```{r}
+#| label: umap
+#| code-summary: "UMAP with cosine metric and density preservation"
+#| eval: false
+
+# ── Standard UMAP ───────────────────────────────────────────────────────────
+srt <- RunUMAP(
+  srt,
+  dims        = selected_pcs,
+  metric      = "cosine",       # Better for high-dimensional gene expression
+  n.neighbors = 30L,
+  min.dist    = 0.3,
+  seed.use    = reseed,
+  verbose     = FALSE
+)
+
+# ── Alternative: Density-preserving UMAP (densMAP) ──────────────────────────
+# From PRJNA548917 workflow — preserves local density information
+srt <- RunUMAP(
+  srt,
+  dims        = selected_pcs,
+  densmap     = TRUE,           # Enable density preservation
+  dens.lambda = 1L,
+  dens.frac   = 0.3,
+  n.epochs    = 1000L,          # More epochs = more stable embedding
+  metric      = "correlation",
+  seed.use    = reseed,
+  verbose     = FALSE
+)
+```
+
+## Clustering with Leiden Algorithm
+
+```{r}
+#| label: clustering
+#| code-summary: "Graph-based clustering with multi-resolution assessment"
+#| eval: false
+
+# ── Build SNN graph ─────────────────────────────────────────────────────────
+srt <- FindNeighbors(srt, dims = selected_pcs, verbose = FALSE)
+
+# ── Leiden clustering at multiple resolutions ────────────────────────────────
+# Tip: ALWAYS test multiple resolutions. Never trust a single one.
+resolutions <- c(0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 2.0)
+
+for (res in resolutions) {
+  srt <- FindClusters(
+    srt,
+    algorithm      = 4,             # 4 = Leiden algorithm
+    resolution     = res,
+    random.seed    = reseed,
+    verbose        = FALSE
+  )
+}
+
+# ── Clustree: visualize clustering hierarchy ─────────────────────────────────
+# This shows how clusters split/merge across resolutions
+library(clustree)
+clustree(srt, prefix = "SCT_snn_res.") +
+  labs(title = "Cluster resolution hierarchy") +
+  theme(legend.position = "bottom")
+```
+
+::: {.callout-tip}
+## How to Choose the Right Resolution
+
+From the `clustree` plot, look for:
+
+1. **Stable branches** — clusters that persist across resolutions
+2. **No excessive splitting** — avoid resolutions where many small clusters appear
+3. **Biological validation** — does the marker gene expression match known cell types?
+
+The typical range for most scRNA-seq datasets is **0.4–1.0**.
+:::
+
+
+# Marker Gene Detection
+
+```{r}
+#| label: find-markers
+#| code-summary: "Differential expression with logistic regression + latent variable correction"
+#| eval: false
+
+# ── Memory reset before heavy computation ────────────────────────────────────
+# Tip: Switch to sequential, gc(), then switch back to parallel
+plan("sequential")
+invisible(gc())
+plan("multicore", workers = n_cores)
+
+# ── Find all markers using Logistic Regression ───────────────────────────────
+# From PRJNA548917 workflow:
+# LR test with latent.vars regresses out technical variation
+all_markers <- FindAllMarkers(
+  srt,
+  test.use        = "LR",                        # Logistic regression
+  latent.vars     = c("log10GenesPerUMI"),        # Technical covariate
+  only.pos        = TRUE,                         # Positive markers only
+  min.pct         = 0.01,                         # In ≥1% of cells
+  logfc.threshold = 0,                            # No FC filter (filter later)
+  min.cells.feature = 2,
+  verbose         = FALSE
+) |>
+  # Add percentage difference (scCustomize utility)
+  Add_Pct_Diff()
+
+# ── Filter and rank markers ─────────────────────────────────────────────────
+top_markers <- all_markers |>
+  filter(p_val_adj < 0.05) |>
+  group_by(cluster) |>
+  slice_max(order_by = avg_log2FC, n = 20) |>
+  ungroup()
+
+# ── Save marker table ────────────────────────────────────────────────────────
+write_csv(all_markers, here(tables_dir, "all_markers.csv"))
+```
+
+
+# Publication-Quality Visualization {#sec-viz}
+
+::: {.callout-important}
+## Figure Standards for Top-Tier Journals
+
+| Parameter | Nature/Science/Cell |
+|-----------|:------------------:|
+| Resolution | **300 DPI** minimum |
+| Format | PDF (vector) or TIFF (raster) |
+| Font | Arial or Helvetica |
+| Font size | ≥ 6pt (smallest), ≥ 8pt (labels) |
+| Line width | ≥ 0.5 pt |
+| Color | RGB for digital, consider colorblind-safe palettes |
+| Panel labels | **a**, **b**, **c** (lowercase bold) |
+| Scale bars | Required for all spatial/microscopy |
+:::
+
+## UMAP Plots
+
+```{r}
+#| label: umap-plots
+#| code-summary: "Publication-ready UMAP with cluster labels"
+#| eval: false
+#| fig-width: 14
+#| fig-height: 12
+
+# ── Store color palette in the Seurat object ─────────────────────────────────
+# Tip: This pattern from Harkany Lab ensures consistent colors across all plots
+n_clusters <- length(levels(Idents(srt)))
+cluster_pal <- scCustomize::DiscretePalette_scCustomize(
+  num_colors = n_clusters,
+  palette = "varibow"
+)
+srt@misc$cluster_pal <- cluster_pal
+
+# ── UMAP with cluster identity ──────────────────────────────────────────────
+p_umap <- DimPlot_scCustom(
+  srt,
+  label          = TRUE,
+  label.size     = 5,
+  repel          = TRUE,
+  colors_use     = cluster_pal,
+  raster         = TRUE,         # ALWAYS rasterize for >5000 cells
+  raster.dpi     = 300,
+  pt.size        = 0.8
+) +
+  NoAxes() +
+  ggtitle(NULL) +
+  theme(
+    legend.position  = "right",
+    legend.text      = element_text(size = 10),
+    plot.margin      = margin(5, 5, 5, 5)
+  )
+
+p_umap
+```
+
+## Feature Plots with Rasterization
+
+```{r}
+#| label: feature-plots
+#| code-summary: "Gene expression on UMAP — rasterized for file size"
+#| eval: false
+#| fig-width: 16
+#| fig-height: 12
+
+# ── Genes of interest (neuropeptide system from Gueissaz_2025) ───────────────
+genes_of_interest <- c("Crh", "Oxt", "Avp", "Trh", "Sst", "Mc4r")
+
+# ── Feature plots with scCustomize ──────────────────────────────────────────
+# Tip: FeaturePlot_scCustom handles zero-expression cells gracefully
+FeaturePlot_scCustom(
+  srt,
+  features    = genes_of_interest,
+  colors_use  = viridis(256, option = "magma"),
+  na_cutoff   = 0.1,      # Cells below this are grey (not colored)
+  order       = TRUE,      # Plot high-expression cells on top
+  raster      = TRUE,
+  raster.dpi  = 300,
+  num_columns = 3
+) &
+  NoAxes() &
+  theme(
+    plot.title = element_text(size = 14, face = "italic"),
+    legend.key.height = unit(1, "cm")
+  )
+```
+
+## DotPlot for Marker Visualization
+
+```{r}
+#| label: dotplot
+#| code-summary: "DotPlot — the workhorse of cell type characterization"
+#| eval: false
+#| fig-width: 18
+#| fig-height: 8
+
+# ── Curated marker gene sets by cell type ────────────────────────────────────
+marker_sets <- list(
+  "Glutamatergic" = c("Slc17a6", "Slc17a7"),
+  "GABAergic"     = c("Gad1", "Gad2", "Slc32a1"),
+  "Dopaminergic"  = c("Th", "Ddc", "Slc6a3"),
+  "Neuropeptides" = c("Crh", "Oxt", "Avp", "Trh", "Sst", "Npy"),
+  "Astrocytes"    = c("Aqp4", "Gfap", "Aldh1l1", "Slc1a3"),
+  "Microglia"     = c("Cx3cr1", "P2ry12", "Tmem119"),
+  "Oligos"        = c("Mbp", "Plp1", "Mog")
+)
+
+# Flatten to vector for DotPlot
+markers_flat <- unlist(marker_sets, use.names = FALSE) |> unique()
+
+# ── DotPlot with publication styling ─────────────────────────────────────────
+DotPlot(
+  srt,
+  features  = markers_flat,
+  cols      = c("#adffff", "#0084ff"),   # Light cyan → blue gradient
+  col.min   = -1,
+  col.max   = 1,
+  dot.scale = 8
+) +
+  RotatedAxis() +
+  labs(x = NULL, y = NULL) +
+  theme(
+    axis.text.x = element_text(size = 10, face = "italic"),
+    axis.text.y = element_text(size = 11)
+  )
+```
+
+## Stacked Violin Plots
+
+```{r}
+#| label: stacked-violin
+#| code-summary: "Stacked violin — compact multi-gene visualization"
+#| eval: false
+#| fig-width: 14
+#| fig-height: 16
+
+# ── Stacked violin plot from scCustomize ─────────────────────────────────────
+Stacked_VlnPlot(
+  srt,
+  features    = markers_flat,
+  colors_use  = cluster_pal,
+  x_lab_rotate = TRUE,
+  plot_spacing = 0.15
+)
+```
+
+## UpSet Plots for Co-Expression Patterns
+
+```{r}
+#| label: upset-coexpression
+#| code-summary: "UpSet plot — visualize gene co-expression at single-cell level"
+#| eval: false
+#| fig-width: 14
+#| fig-height: 8
+
+# ── Extract expression matrix and create binary co-expression ────────────────
+# Pattern from Zupancic_2023 / eCB-hypothalamus workflows
+genes_for_upset <- c("Gad1", "Gad2", "Slc32a1", "Slc17a6", "Th", "Ddc")
+
+# Get normalized expression
+mtx <- GetAssayData(srt, assay = "RNA", layer = "data") |>
+  as.data.frame() |>
+  t()
+
+# Select genes and apply quantile threshold
+mtx_sub <- mtx[, genes_for_upset, drop = FALSE]
+
+# Per-gene thresholding: cell expresses gene if above 10th percentile
+threshold_vector <- apply(mtx_sub, 2, function(x) quantile(x[x > 0], 0.1))
+binary_mtx <- sweep(mtx_sub, 2, threshold_vector, ">") |>
+  as.data.frame() |>
+  mutate(across(everything(), as.integer))
+
+# ── UpSet plot ───────────────────────────────────────────────────────────────
+upset(
+  binary_mtx,
+  sets         = genes_for_upset,
+  order.by     = "freq",
+  nintersects  = 30,
+  point.size   = 3,
+  line.size    = 1,
+  text.scale   = c(1.5, 1.2, 1.2, 1, 1.5, 1.2),
+  mb.ratio     = c(0.6, 0.4),
+  mainbar.y.label = "Number of cells",
+  sets.x.label    = "Cells per gene"
+)
+```
+
+
+# Cell Type Classification {#sec-classification}
+
+```{r}
+#| label: cell-classification
+#| code-summary: "Multi-marker cell type assignment with union logic"
+#| eval: false
+
+# ── Pattern from Zupancic_2023 — classify by neurotransmitter phenotype ──────
+# Create binary expression matrix (as above)
+
+# All-present logic (AND): cell must express ALL markers
+srt$gaba_strict <- binary_mtx |>
+  select(Gad1, Gad2, Slc32a1) |>
+  mutate(gaba = if_all(.fns = ~ .x > 0)) |>
+  pull(gaba)
+
+# Any-present logic (OR): cell expresses ANY marker
+srt$gaba_loose <- binary_mtx |>
+  select(Gad1, Gad2, Slc32a1) |>
+  mutate(gaba = if_any(.fns = ~ .x > 0)) |>
+  pull(gaba)
+
+# Glutamatergic
+srt$glut_strict <- binary_mtx |>
+  select(Slc17a6) |>
+  mutate(glut = Slc17a6 > 0) |>
+  pull(glut)
+
+# ── Assign cell types using case_when ────────────────────────────────────────
+srt$cell_type <- case_when(
+  srt$gaba_strict & !srt$glut_strict ~ "GABAergic",
+  srt$glut_strict & !srt$gaba_loose  ~ "Glutamatergic",
+  srt$gaba_strict &  srt$glut_strict ~ "Mixed",
+  TRUE                                ~ "Unassigned"
+)
+
+# ── Verify with frequency table ──────────────────────────────────────────────
+srt@meta.data |> janitor::tabyl(cell_type) |> janitor::adorn_pct_formatting()
+```
+
+
+# Sex Scoring & Biological Covariates
+
+```{r}
+#| label: sex-scoring
+#| code-summary: "Assign biological sex from gene expression"
+#| eval: false
+
+# ── Custom sex scoring function (from Zupancic_2023) ────────────────────────
+sex_features <- list(
+  female = c("Tsix", "Xist"),
+  male   = c("Eif2s3y", "Ddx3y", "Uty", "Kdm5d")
+)
+
+srt <- AddModuleScore(srt, features = sex_features, name = "sex_score_")
+
+# Assign sex based on score threshold
+srt$sex <- case_when(
+  srt$sex_score_1 > quantile(srt$sex_score_1, 0.80) ~ "Female",
+  srt$sex_score_2 > quantile(srt$sex_score_2, 0.80) ~ "Male",
+  TRUE ~ "Unassigned"
+)
+```
+
+
+# Cross-Dataset Integration & Label Transfer
+
+```{r}
+#| label: label-transfer
+#| code-summary: "Transfer cell type labels from reference to query"
+#| eval: false
+
+# ── Pattern from pr-PT / eCB-hypothalamus workflows ─────────────────────────
+# Map new data onto an existing reference atlas
+
+# Step 1: Find transfer anchors
+anchors <- FindTransferAnchors(
+  reference  = ref_srt,
+  query      = query_srt,
+  reduction  = "pcaproject",
+  dims       = 1:30,
+  verbose    = FALSE
+)
+
+# Step 2: Transfer labels
+predictions <- TransferData(
+  anchorset = anchors,
+  refdata   = ref_srt$cell_type,
+  dims      = 1:30
+)
+
+# Step 3: Add predictions to query
+query_srt <- AddMetaData(query_srt, metadata = predictions)
+
+# Step 4: Map query onto reference UMAP coordinates
+query_srt <- MapQuery(
+  anchorset   = anchors,
+  reference   = ref_srt,
+  query       = query_srt,
+  refdata     = list(cell_type = "cell_type"),
+  reference.reduction = "umap",
+  reduction.model = "umap"
+)
+```
+
+
+# Saving & Sharing Results {#sec-saving}
+
+```{r}
+#| label: save-results
+#| code-summary: "Save processed Seurat object and figures"
+#| eval: false
+
+# ── Save Seurat object (for future sessions) ────────────────────────────────
+# Tip: Use H5Seurat for efficient storage and fast loading
+SaveH5Seurat(
+  srt,
+  filename  = here(output_dir, "srt_processed.h5seurat"),
+  overwrite = TRUE,
+  verbose   = TRUE
+)
+
+# ── Save individual figures as PDF + PNG ─────────────────────────────────────
+# PDF for journal submission, PNG for presentations/posters
+save_my_plot <- function(plot, name, width = 14, height = 12) {
+  cowplot::save_plot(
+    filename    = here(plots_dir, paste0(name, ".pdf")),
+    plot        = plot,
+    base_width  = width,
+    base_height = height,
+    dpi         = 300
+  )
+  cowplot::save_plot(
+    filename    = here(plots_dir, paste0(name, ".png")),
+    plot        = plot,
+    base_width  = width,
+    base_height = height,
+    dpi         = 300
+  )
+}
+```
+
+
+# Unix & Programming Survival One-Liners {#sec-oneliners}
+
+::: {.callout-tip}
+## Terminal Commands You'll Use Daily
+
+```bash
+# ── File management ──────────────────────────────────────────────────────────
+ls -lhS *.h5                        # List H5 files sorted by size
+du -sh data/*                        # Disk usage per file in data/
+find . -name "*.rds" -size +1G       # Find large RDS files
+
+# ── Text processing ─────────────────────────────────────────────────────────
+wc -l data/*.csv                     # Count lines in all CSVs
+head -1 data/metadata.csv | tr ',' '\n' | nl  # Show CSV column names numbered
+cut -d',' -f1,3 data/metadata.csv | sort | uniq -c | sort -rn  # Frequency table
+
+# ── Git essentials ───────────────────────────────────────────────────────────
+git log --oneline -10                # Last 10 commits, compact
+git diff --stat HEAD~1               # What changed in last commit
+git stash && git pull && git stash pop  # Quick pull with local changes
+
+# ── pixi workflow ────────────────────────────────────────────────────────────
+pixi run start                       # Launch radian
+pixi run render                      # Render all notebooks
+pixi run preview                     # Live-preview website
+pixi task list                       # Show all available tasks
+
+# ── Process management ───────────────────────────────────────────────────────
+htop                                 # Interactive process monitor
+kill %1                              # Kill first background job
+nohup pixi run render &              # Render in background, survives logout
+
+# ── SSH & remote work ────────────────────────────────────────────────────────
+ssh -L 8787:localhost:8787 user@server  # Tunnel RStudio Server
+rsync -avz --progress data/ server:~/project/data/  # Sync data to cluster
+screen -S analysis                   # Persistent terminal session
+```
+:::
+
+
+::: {.callout-tip}
+## R One-Liners for Single-Cell Work
+
+```r
+# ── Quick data inspection ────────────────────────────────────────────────────
+ncol(srt)                            # Number of cells
+nrow(srt)                            # Number of genes
+table(Idents(srt))                   # Cells per cluster
+srt@meta.data |> skimr::skim()       # Full metadata summary
+
+# ── Subset operations ────────────────────────────────────────────────────────
+subset(srt, idents = c("0", "1", "5"))           # Keep clusters 0, 1, 5
+subset(srt, subset = nFeature_RNA > 1000)         # Filter by metadata
+WhichCells(srt, expression = Crh > 2 & Oxt == 0) # Get specific cell barcodes
+
+# ── Quick gene lookup ────────────────────────────────────────────────────────
+rownames(srt)[grep("^Slc", rownames(srt))]       # All solute carriers
+grep("Gaba|Gad|Slc32", rownames(srt), value = TRUE)  # GABAergic markers
+
+# ── Expression statistics ────────────────────────────────────────────────────
+# Percentage of cells expressing a gene per cluster
+srt@meta.data |>
+  mutate(crh_pos = GetAssayData(srt)["Crh", ] > 0) |>
+  group_by(seurat_clusters) |>
+  summarise(pct_crh = mean(crh_pos) * 100, .groups = "drop")
+
+# ── Pipe-friendly metadata wrangling ─────────────────────────────────────────
+srt@meta.data |>
+  group_by(orig.ident, seurat_clusters) |>
+  tally() |>
+  pivot_wider(names_from = seurat_clusters, values_from = n, values_fill = 0)
+```
+:::
+
+
+# Reproducibility Checklist {#sec-checklist}
+
+::: {.callout-important}
+## Before You Submit / Share / Present
+
+- [ ] **`pixi.lock` committed** — exact package versions for anyone to reproduce
+- [ ] **Seeds set** — `set.seed()` before every stochastic operation
+- [ ] **`here::here()`** — no absolute paths, no `setwd()`
+- [ ] **QC documented** — thresholds stated, violin plots saved
+- [ ] **Figures at 300 DPI** — PDF for vectors, PNG for raster
+- [ ] **Session info recorded** — see below
+- [ ] **No large files in git** — use `.gitignore` for `.h5`, `.rds`, `.h5ad`, `*.fastq.gz`
+- [ ] **README exists** — what does this repo do, how to run it
+:::
+
+
+# Session Information
+
+```{r}
+#| label: session-info
+#| code-summary: "Full session information for reproducibility"
+#| cache: false
+
+sessioninfo::session_info()
+```
+
+::: {.callout-note}
+## References & Further Reading
+
+**Seurat vignettes (bookmark these):**
+
+- [Essential commands](https://satijalab.org/seurat/articles/essential_commands)
+- [SCTransform](https://satijalab.org/seurat/articles/sctransform_vignette)
+- [Integration](https://satijalab.org/seurat/articles/seurat5_integration)
+- [Multimodal (WNN)](https://satijalab.org/seurat/articles/weighted_nearest_neighbor_analysis)
+- [ATAC-seq integration](https://satijalab.org/seurat/articles/seurat5_atacseq_integration_vignette)
+- [Spatial transcriptomics](https://satijalab.org/seurat/articles/spatial_vignette)
+- [Visium HD](https://satijalab.org/seurat/articles/seurat5_sketch_analysis)
+
+**Harkany Lab published analyses (your templates):**
+
+- [Gueissaz et al., 2025 — PVN metabopioids](https://harkany-lab.github.io/Gueissaz_2025/02-endo-metabopioids.html)
+- [Zupancic et al., 2023 — Onecut3 dynamics](https://harkany-lab.github.io/Zupancic_2023/dynamic_oc3-pop.html)
+- [SCN development EDA](https://eugot.github.io/SCN_dev/eda.html)
+- [PRJNA548917 — Hypothalamus atlas](https://eugot.github.io/PRJNA548917/01A-eda-whole_dataset-fpr_0.001.html)
+- [eCB hypothalamus development](https://eugot.github.io/eCB-hypothalamus-development/02-endo-cb.html)
+- [Mc4r in postnatal PVN](https://harkany-lab.github.io/mc4r/2021-05-18_pr_adult_pvn_neurons_mc4r.html)
+
+**Quarto documentation:**
+
+- [Using R in Quarto](https://quarto.org/docs/computations/r.html)
+- [Quarto manuscripts](https://quarto.org/docs/manuscripts/)
+- [Presentations with Revealjs](https://quarto.org/docs/presentations/revealjs/)
+:::

@@ -1,0 +1,379 @@
+---
+title: "Cytonaut — Seminar 01: Reproducible EDA & QC (Seurat, RNA-only)"
+subtitle: "Hands-on with `oldCCA_nae_srt.rds` (Romanov et al., 2020; PubMed 32499648)"
+author: ""
+date: last-modified
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-tools: true
+    number-sections: true
+execute:
+  cache: false
+  warning: false
+  message: false
+params:
+  # Recommended: keep data inside project (relative path); configure task will symlink if available.
+  data_rds: "data/oldCCA_nae_srt.rds"
+  seed: 42
+  low_cutoff_gene: 500
+  high_cutoff_gene: 6000
+  low_cutoff_umis: -Inf
+  high_cutoff_umis: 20000
+  high_cutoff_pc_mt: 15
+  high_cutoff_pc_ribo: 15
+  high_cutoff_pc_hb: 0.1
+  high_cutoff_complexity: 0.85
+---
+
+# Seminar agenda (what we practice from day 1)
+
+- **Reproducibility is not a “last day” topic**: deterministic environment (Pixi), deterministic report (Quarto), deterministic analysis (seed + session logging).
+- **Publication-quality habits from the first plot**: fixed figure sizes, consistent theme, saved outputs, and a “what changed?” paper trail (git).
+
+::: callout-note
+Run this seminar as a manuscript website:
+
+```bash
+pixi run render
+# or live preview
+pixi run preview
+
+:::
+
+0) Reproducibility guardrails (do these before touching biology)
+
+suppressPackageStartupMessages({
+  library(here)
+  library(tidyverse)
+  library(magrittr)
+  library(zeallot)
+  library(future)
+
+  library(Seurat)
+  library(SeuratDisk)
+  library(patchwork)
+  library(RColorBrewer)
+
+  library(sessioninfo)
+})
+
+# Make "here()" stable even if you run from a subdir
+if (file.exists("index.qmd")) here::i_am("index.qmd")
+
+# Seed discipline (same seed for sampling/shuffle/plots unless explicitly changed)
+reseed <- as.integer(Sys.getenv("CYTONAUT_SEED", unset = params$seed))
+set.seed(reseed)
+
+# Rendering discipline:
+# - keep sequential to avoid memory spikes during report render
+# - (switch to multisession interactively if you know what you're doing)
+plan("sequential")
+options(
+  future.globals.maxSize = Inf,
+  future.rng.onMisuse = "ignore"
+)
+
+# Output locations (always relative)
+output_dir <- Sys.getenv("CYTONAUT_OUTPUT_DIR", unset = "output")
+fig_dir    <- Sys.getenv("CYTONAUT_FIG_DIR", unset = file.path(output_dir, "figures"))
+tbl_dir    <- Sys.getenv("CYTONAUT_TABLE_DIR", unset = file.path(output_dir, "tables"))
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(tbl_dir, recursive = TRUE, showWarnings = FALSE)
+
+::: callout-tip
+Empty environment mindset (workflowr-style): when rendering, you should behave as if the environment is empty.
+If you’re iterating in an interactive R session, restart often.
+:::
+
+# Quick sanity checks you’ll thank yourself for in 2 weeks:
+cat("Project root:", here(), "\n")
+cat("Git HEAD (if available):\n")
+try(cat(system("git rev-parse --short HEAD", intern = TRUE), "\n"), silent = TRUE)
+
+cat("\nPixi env:\n")
+cat("CONDA_PREFIX:", Sys.getenv("CONDA_PREFIX"), "\n")
+cat("PIXI_PROJECT_ROOT:", Sys.getenv("PIXI_PROJECT_ROOT"), "\n")
+
+1) Load data (Seurat object)
+
+data_rds <- Sys.getenv("CYTONAUT_DATA_RDS", unset = params$data_rds)
+
+if (!file.exists(data_rds)) {
+  stop(
+    "Cannot find data_rds: ", data_rds, "\n\n",
+    "Fix options:\n",
+    "  1) put file at data/oldCCA_nae_srt.rds\n",
+    "  2) or set CYTONAUT_DATA_RDS=/path/to/oldCCA_nae_srt.rds\n",
+    "  3) or set CYTONAUT_DATA_RDS_SRC=/path/to/oldCCA_nae_srt.rds then run: pixi run configure\n"
+  )
+}
+
+srt <- readRDS(data_rds)
+srt <- UpdateSeuratObject(srt)
+
+# Make cell names explicitly available (useful for joins/tables/export)
+srt$cell_name <- colnames(srt)
+
+1.1 Object audit (pitfalls you catch early)
+
+cat("Assays:", paste(Assays(srt), collapse = ", "), "\n")
+cat("Default assay:", DefaultAssay(srt), "\n")
+cat("Cells:", ncol(srt), "\n")
+cat("Features (genes):", nrow(srt), "\n")
+
+# Most important: metadata columns (what can we stratify by?)
+head(colnames(srt@meta.data), 30)
+
+::: callout-warning
+Common pitfall: you think you’re plotting “clusters”, but Idents() is still set to something else.
+Always print Idents(srt) early and set it intentionally.
+:::
+
+# If a sensible identity exists, set it. Otherwise default to orig.ident if present.
+candidate_idents <- c("seurat_clusters", "clusters", "cluster", "wtree", "subregion", "orig.ident")
+ident_choice <- candidate_idents[candidate_idents %in% colnames(srt@meta.data)][1]
+
+if (!is.na(ident_choice)) {
+  Idents(srt) <- ident_choice
+  cat("Idents set to:", ident_choice, "\n")
+} else {
+  cat("No obvious ident column found; Idents unchanged.\n")
+}
+
+2) Quick EDA (what is already there?)
+
+# UMAP check: old objects may have non-standard column names
+if ("umap" %in% names(srt@reductions)) {
+  emb <- srt@reductions$umap@cell.embeddings
+  if (ncol(emb) >= 2) colnames(emb)[1:2] <- c("UMAP_1", "UMAP_2")
+  srt@reductions$umap@cell.embeddings <- emb
+}
+
+p_umap <- NULL
+if ("umap" %in% names(srt@reductions)) {
+  p_umap <- DimPlot(srt, reduction = "umap", pt.size = 0.1) +
+    ggtitle("UMAP (as stored in object)") +
+    theme(plot.title = element_text(face = "bold"))
+  p_umap
+} else {
+  cat("No UMAP reduction found in object.\n")
+}
+
+3) QC metrics (compute once, reuse everywhere)
+
+3.1 Compute QC features
+
+# Mouse conventions used in our lab pages:
+# - mito: ^mt-
+# - ribo: ^Rpl or ^Rps
+# - hemoglobin: ^Hb[ab]
+DefaultAssay(srt) <- "RNA"
+
+srt[["percent_mito"]] <- PercentageFeatureSet(srt, pattern = "^mt-")
+srt[["percent_ribo"]] <- PercentageFeatureSet(srt, pattern = "^Rpl|^Rps")
+srt[["percent_hb"]]   <- PercentageFeatureSet(srt, pattern = "^Hb[ab]")
+
+# Complexity proxy used in our QC reports
+srt$log10GenesPerUMI <- log10(srt$nFeature_RNA) / log10(srt$nCount_RNA)
+
+3.2 Store palettes inside the Seurat object (so plots stay consistent)
+
+Store_Palette_Seurat <- function(seurat_object, palette, palette_name) {
+  if (is.null(seurat_object@misc)) seurat_object@misc <- list()
+  seurat_object@misc[[palette_name]] <- palette
+  seurat_object
+}
+
+qc_palette <- c(
+  "Pass" = "#2E7D32",
+  "Low_nFeature" = "#D32F2F",
+  "High_nFeature" = "#6A1B9A",
+  "High_nCount" = "#1565C0",
+  "High_MT" = "#EF6C00",
+  "High_Ribo" = "#00838F",
+  "High_Hb" = "#4E342E",
+  "Low_Complexity" = "#AD1457"
+)
+
+srt <- Store_Palette_Seurat(srt, rev(brewer.pal(n = 11, name = "RdYlGn")), "mdat_Colour_Pal")
+srt <- Store_Palette_Seurat(srt, rev(brewer.pal(n = 11, name = "Spectral")), "expr_Colour_Pal")
+srt <- Store_Palette_Seurat(srt, qc_palette, "qc_palette")
+
+4) QC plots (EDA = figures + saved outputs)
+
+4.1 Publication-quality figure helper (use every time)
+
+theme_set(theme_classic(base_size = 12))
+
+save_fig <- function(p, name, width = 7, height = 5) {
+  pdf_path <- file.path(fig_dir, paste0(name, ".pdf"))
+  png_path <- file.path(fig_dir, paste0(name, ".png"))
+
+  ggsave(pdf_path, plot = p, width = width, height = height, units = "in", device = cairo_pdf)
+  ggsave(png_path, plot = p, width = width, height = height, units = "in", dpi = 300, device = ragg::agg_png)
+
+  tibble(file = c(pdf_path, png_path))
+}
+
+4.2 Violin overview
+
+p_vln <- VlnPlot(
+  srt,
+  features = c("nFeature_RNA", "nCount_RNA", "percent_mito", "percent_ribo", "log10GenesPerUMI"),
+  pt.size = 0.1,
+  ncol = 3
+) + plot_annotation(title = "QC overview (raw object)")
+
+p_vln
+save_fig(p_vln, "qc_violin_overview", width = 10, height = 6)
+
+4.3 Scatter plots (log scales + thresholds mindset)
+
+QC_scatter <- function(obj, color_by, title, pt = 0.2) {
+  df <- FetchData(obj, vars = c("nCount_RNA", "nFeature_RNA", color_by)) %>%
+    tibble::rownames_to_column("cell")
+
+  ggplot(df, aes(x = nCount_RNA, y = nFeature_RNA, color = .data[[color_by]])) +
+    geom_point(size = pt, alpha = 0.6) +
+    scale_x_log10() +
+    scale_y_log10() +
+    labs(x = "nCount_RNA (log10)", y = "nFeature_RNA (log10)", color = color_by, title = title) +
+    theme(plot.title = element_text(face = "bold"))
+}
+
+p_sc_mt   <- QC_scatter(srt, "percent_mito", "QC scatter — mitochondrial %")
+p_sc_ribo <- QC_scatter(srt, "percent_ribo", "QC scatter — ribosomal %")
+p_sc_comp <- QC_scatter(srt, "log10GenesPerUMI", "QC scatter — complexity (log10GenesPerUMI)")
+
+(p_sc_mt | p_sc_ribo) / p_sc_comp
+save_fig((p_sc_mt | p_sc_ribo) / p_sc_comp, "qc_scatter_triptych", width = 12, height = 9)
+
+5) Apply QC thresholds (labels you can audit)
+
+::: callout-note
+We start with the exact threshold style used in our published QC reports (feel free to tune later; today we practice discipline).
+Defaults:
+	•	low_cutoff_gene = 500
+	•	high_cutoff_gene = 6000
+	•	high_cutoff_umis = 20000
+	•	high_cutoff_pc_mt = 15
+	•	high_cutoff_pc_ribo = 15
+	•	high_cutoff_pc_hb = 0.1
+	•	high_cutoff_complexity = 0.85
+:::
+
+low_cutoff_gene       <- params$low_cutoff_gene
+high_cutoff_gene      <- params$high_cutoff_gene
+low_cutoff_umis       <- params$low_cutoff_umis
+high_cutoff_umis      <- params$high_cutoff_umis
+high_cutoff_pc_mt     <- params$high_cutoff_pc_mt
+high_cutoff_pc_ribo   <- params$high_cutoff_pc_ribo
+high_cutoff_pc_hb     <- params$high_cutoff_pc_hb
+high_cutoff_complexity <- params$high_cutoff_complexity
+
+# Start with Pass
+srt$QC <- "Pass"
+
+# Lab-style: append additional failure tags (comma-separated) so we *see* compound issues.
+srt$QC <- ifelse(srt$log10GenesPerUMI < high_cutoff_complexity & srt$QC == "Pass", "Low_Complexity", srt$QC)
+srt$QC <- ifelse(srt$log10GenesPerUMI < high_cutoff_complexity & srt$QC != "Pass" & !str_detect(srt$QC, "Low_Complexity"),
+                 paste("Low_Complexity", srt$QC, sep = ","), srt$QC)
+
+srt$QC <- ifelse(srt$nFeature_RNA < low_cutoff_gene & srt$QC == "Pass", "Low_nFeature", srt$QC)
+srt$QC <- ifelse(srt$nFeature_RNA < low_cutoff_gene & srt$QC != "Pass" & !str_detect(srt$QC, "Low_nFeature"),
+                 paste("Low_nFeature", srt$QC, sep = ","), srt$QC)
+
+srt$QC <- ifelse(srt$nFeature_RNA > high_cutoff_gene & srt$QC == "Pass", "High_nFeature", srt$QC)
+srt$QC <- ifelse(srt$nFeature_RNA > high_cutoff_gene & srt$QC != "Pass" & !str_detect(srt$QC, "High_nFeature"),
+                 paste("High_nFeature", srt$QC, sep = ","), srt$QC)
+
+srt$QC <- ifelse(srt$nCount_RNA < low_cutoff_umis & srt$QC == "Pass", "Low_nCount", srt$QC)
+srt$QC <- ifelse(srt$nCount_RNA < low_cutoff_umis & srt$QC != "Pass" & !str_detect(srt$QC, "Low_nCount"),
+                 paste("Low_nCount", srt$QC, sep = ","), srt$QC)
+
+srt$QC <- ifelse(srt$nCount_RNA > high_cutoff_umis & srt$QC == "Pass", "High_nCount", srt$QC)
+srt$QC <- ifelse(srt$nCount_RNA > high_cutoff_umis & srt$QC != "Pass" & !str_detect(srt$QC, "High_nCount"),
+                 paste("High_nCount", srt$QC, sep = ","), srt$QC)
+
+srt$QC <- ifelse(srt$percent_mito > high_cutoff_pc_mt & srt$QC == "Pass", "High_MT", srt$QC)
+srt$QC <- ifelse(srt$percent_mito > high_cutoff_pc_mt & srt$QC != "Pass" & !str_detect(srt$QC, "High_MT"),
+                 paste("High_MT", srt$QC, sep = ","), srt$QC)
+
+srt$QC <- ifelse(srt$percent_ribo > high_cutoff_pc_ribo & srt$QC == "Pass", "High_Ribo", srt$QC)
+srt$QC <- ifelse(srt$percent_ribo > high_cutoff_pc_ribo & srt$QC != "Pass" & !str_detect(srt$QC, "High_Ribo"),
+                 paste("High_Ribo", srt$QC, sep = ","), srt$QC)
+
+srt$QC <- ifelse(srt$percent_hb > high_cutoff_pc_hb & srt$QC == "Pass", "High_Hb", srt$QC)
+srt$QC <- ifelse(srt$percent_hb > high_cutoff_pc_hb & srt$QC != "Pass" & !str_detect(srt$QC, "High_Hb"),
+                 paste("High_Hb", srt$QC, sep = ","), srt$QC)
+
+srt$QC <- factor(srt$QC)
+
+# QC breakdown table
+qc_tab <- srt@meta.data %>%
+  count(QC, sort = TRUE) %>%
+  mutate(frac = n / sum(n))
+
+qc_tab
+write_csv(qc_tab, file.path(tbl_dir, "qc_category_counts.csv"))
+
+# Visualize QC on UMAP (if present)
+if ("umap" %in% names(srt@reductions)) {
+  p_qc_umap <- DimPlot(
+    srt,
+    reduction = "umap",
+    group.by = "QC",
+    pt.size = 0.1
+  ) + ggtitle("QC categories on UMAP")
+
+  p_qc_umap
+  save_fig(p_qc_umap, "qc_umap_categories", width = 9, height = 6)
+}
+
+6) Filter, record, save (the reproducible handoff)
+
+pre_n <- ncol(srt)
+
+# Conservative start: keep only exact "Pass" (not mixed labels)
+srt_filt <- subset(srt, subset = QC == "Pass")
+post_n <- ncol(srt_filt)
+
+tibble(stage = c("pre", "post"), n_cells = c(pre_n, post_n))
+
+# Save filtered object for the rest of the course
+out_rds <- file.path("data", "oldCCA_nae_srt.filtered.Pass.rds")
+saveRDS(srt_filt, out_rds)
+
+# Optional: save interoperable formats (pattern used in our published reports)
+# SaveH5Seurat(srt_filt, filename = file.path("data", "oldCCA_nae_srt.filtered.Pass.h5Seurat"), overwrite = TRUE)
+# Convert(file.path("data", "oldCCA_nae_srt.filtered.Pass.h5Seurat"), dest = "h5ad", overwrite = TRUE)
+
+tibble(saved = out_rds)
+
+7) Unix + workflow one-liners (the ones you will actually use)
+
+# where am I / what changed?
+pwd
+git status -sb
+git diff
+
+# render / preview
+pixi run render
+pixi run preview
+
+# fast file sizes
+du -sh data/* output/* 2>/dev/null | sort -h
+
+# search inside the repo (ripgrep)
+rg -n "percent_mito|log10GenesPerUMI|SaveH5Seurat" .
+
+# what environment is running this?
+echo "$CONDA_PREFIX"
+echo "$PIXI_PROJECT_ROOT"
+
+8) Session information (attach to every result you show to humans)
+
+sessioninfo::session_info()
