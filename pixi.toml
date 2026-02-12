@@ -21,13 +21,17 @@ render-seminar01 = "quarto render notebooks/01-seminar-single-cell-fundamentals.
 preview = "quarto preview"
 
 # Setup chain: install BiocManager, then Bioconductor pkgs, then GitHub pkgs
-setup-environment = { depends-on = ["configure", "bioconductor-install", "github-install"] }
+setup-environment = { depends-on = ["configure", "cran-install", "bioconductor-install", "github-install"] }
 
 # Step 1: Configure BiocManager
 configure = { cmd = [
   "Rscript", "-e",
   "BiocManager::install(version = '3.21', dependencies = TRUE, upgrade_dependencies = TRUE, ask = FALSE)"
 ] }
+
+cran-install = { cmd = [
+	"Rscript", "-e",
+	"install.packages('ggrastr')" ]}
 
 # Step 2: Install Bioconductor packages not available on conda-forge
 bioconductor-install = { cmd = [
@@ -52,6 +56,27 @@ rstudio = "open -a RStudio"
 # On Windows, launch RStudio from default install path or PATH
 [target.win-64.tasks]
 rstudio = "rstudio"
+
+# Windows-specific R tasks (Rscript wrapper has issues, use R.exe directly)
+configure = { cmd = [
+  "R.exe", "--no-echo", "--no-restore", "-e",
+  "BiocManager::install(version = '3.20', dependencies = TRUE, upgrade_dependencies = TRUE, ask = FALSE)"
+] }
+
+cran-install = { cmd = [
+  "R.exe", "--no-echo", "--no-restore", "-e",
+  "install.packages('ggrastr')"
+] }
+
+bioconductor-install = { cmd = [
+  "R.exe", "--no-echo", "--no-restore", "-e",
+  "BiocManager::install(c('AnnotationDbi', 'BiocGenerics', 'IRanges', 'S4Vectors', 'MatrixGenerics', 'gprofiler2', 'UCSC.utils', 'SummarizedExperiment', 'SingleCellExperiment', 'org.Mm.eg.db', 'org.Hs.eg.db', 'EnsDb.Mmusculus.v79', 'EnsDb.Hsapiens.v86', 'scater', 'scran', 'scuttle', 'glmGamPoi', 'DESeq2', 'ensembldb'), dependencies = TRUE, ask = FALSE)"
+], depends-on = ["configure"] }
+
+github-install = { cmd = [
+  "R.exe", "--no-echo", "--no-restore", "-e",
+  "remotes::install_github(c('satijalab/seurat', 'satijalab/seurat-data', 'satijalab/seurat-wrappers', 'samuel-marsh/scCustomize', 'sjessa/ggmin', 'thomasp85/patchwork', 'satijalab/azimuth'), dependencies = TRUE, upgrade = 'never')"
+], depends-on = ["bioconductor-install"] }
 
 # ── Dependencies (all from conda-forge/bioconda, cross-platform) ─────────────
 [dependencies]
@@ -90,7 +115,6 @@ r-cowplot = ">=1.2.0,<2"
 r-patchwork = ">=1.3.0,<2"
 r-ggnewscale = ">=0.5.0,<0.6"
 r-ggrepel = ">=0.9.6,<0.10"
-r-ggrastr = ">=1.0.2,<2"
 r-ggstatsplot = ">=0.13.0,<0.14"
 r-rcolorbrewer = ">=1.1_3,<2"
 r-viridis = ">=0.6.5,<0.7"
@@ -107,9 +131,17 @@ r-sessioninfo = ">=1.2.3,<2"
 
 # --- Python interop (for CellBender, scvi-tools, scrublet) ---
 r-reticulate = ">=1.40.0,<2"
-python = ">=3.12,<3.13"
+python = ">=3.11,<3.12"
 
-# --- System libraries ---
+
+[target.linux-64.dependencies]
 zlib = ">=1.3.1,<2"
 liblzma = ">=5.6,<6"
-liblzma-devel = ">=5.6,<6"
+
+# On macOS, both Intel and Apple Silicon use `open -a`
+[target.osx.dependencies]
+zlib = ">=1.3.1,<2"
+liblzma = ">=5.6,<6"
+
+# On Windows, launch RStudio from default install path or PATH
+[target.win-64.dependencies]
